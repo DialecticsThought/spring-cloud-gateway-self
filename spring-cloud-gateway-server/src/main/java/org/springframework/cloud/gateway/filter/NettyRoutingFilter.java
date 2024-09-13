@@ -88,7 +88,7 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 	private volatile List<HttpHeadersFilter> headersFilters;
 
 	public NettyRoutingFilter(HttpClient httpClient, ObjectProvider<List<HttpHeadersFilter>> headersFiltersProvider,
-			HttpClientProperties properties) {
+							  HttpClientProperties properties) {
 		this.httpClient = httpClient;
 		this.headersFiltersProvider = headersFiltersProvider;
 		this.properties = properties;
@@ -106,9 +106,18 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 		return ORDER;
 	}
 
+	/**
+	 * NettyRoutingFilter 负责将请求通过NettyProxy 本质是HttpCLient 打到指定的Http服务
+	 *
+	 * @param exchange the current server exchange
+	 * @param chain    provides a way to delegate to the next filter
+	 * @return
+	 */
 	@Override
 	@SuppressWarnings("Duplicates")
 	public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+		// 经过负载均衡之后的请求url，具体的下游服务请求地址
+		// http://192.168.236.173:8020/order/findOrderByUserId/1?color=blue
 		URI requestUrl = exchange.getRequiredAttribute(GATEWAY_REQUEST_URL_ATTR);
 
 		String scheme = requestUrl.getScheme();
@@ -118,18 +127,20 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 		setAlreadyRouted(exchange);
 
 		ServerHttpRequest request = exchange.getRequest();
-
+		// GET 请求
 		final HttpMethod method = HttpMethod.valueOf(request.getMethod().name());
+		// url为 http://192.168.236.173:8020/order/findOrderByUserId/1?color=blue
 		final String url = requestUrl.toASCIIString();
-
+		// 请求头
 		HttpHeaders filtered = filterRequest(getHeadersFilters(), exchange);
 
 		final DefaultHttpHeaders httpHeaders = new DefaultHttpHeaders();
 		filtered.forEach(httpHeaders::set);
 
 		boolean preserveHost = exchange.getAttributeOrDefault(PRESERVE_HOST_HEADER_ATTRIBUTE, false);
+		// 路由对象
 		Route route = exchange.getAttribute(GATEWAY_ROUTE_ATTR);
-
+		// 这里直接过去到httpClient 然后发送请求
 		Flux<HttpClientResponse> responseFlux = getHttpClient(route, exchange).headers(headers -> {
 			headers.add(httpHeaders);
 			// Will either be set below, or later by Netty
@@ -138,6 +149,7 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 				String host = request.getHeaders().getFirst(HttpHeaders.HOST);
 				headers.add(HttpHeaders.HOST, host);
 			}
+			// 发送请求
 		}).request(method).uri(url).send((req, nettyOutbound) -> {
 			if (log.isTraceEnabled()) {
 				nettyOutbound.withConnection(connection -> log.trace("outbound route: "
@@ -215,15 +227,13 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 		HttpStatus status = HttpStatus.resolve(clientResponse.status().code());
 		if (status != null) {
 			response.setStatusCode(status);
-		}
-		else {
+		} else {
 			while (response instanceof ServerHttpResponseDecorator) {
 				response = ((ServerHttpResponseDecorator) response).getDelegate();
 			}
 			if (response instanceof AbstractServerHttpResponse) {
 				((AbstractServerHttpResponse) response).setRawStatusCode(clientResponse.status().code());
-			}
-			else {
+			} else {
 				// TODO: log warning here, not throw error?
 				throw new IllegalStateException("Unable to set status code " + clientResponse.status().code()
 						+ " on response of type " + response.getClass().getName());
@@ -235,7 +245,8 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 	 * Creates a new HttpClient with per route timeout configuration. Sub-classes that
 	 * override, should call super.getHttpClient() if they want to honor the per route
 	 * timeout configuration.
-	 * @param route the current route.
+	 *
+	 * @param route    the current route.
 	 * @param exchange the current ServerWebExchange.
 	 * @return the configured HttpClient.
 	 */
@@ -252,8 +263,7 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 		Integer connectTimeout;
 		if (connectTimeoutAttr instanceof Integer) {
 			connectTimeout = (Integer) connectTimeoutAttr;
-		}
-		else {
+		} else {
 			connectTimeout = Integer.parseInt(connectTimeoutAttr.toString());
 		}
 		return connectTimeout;
@@ -265,13 +275,11 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 				Long routeResponseTimeout = getLong(route.getMetadata().get(RESPONSE_TIMEOUT_ATTR));
 				if (routeResponseTimeout != null && routeResponseTimeout >= 0) {
 					return Duration.ofMillis(routeResponseTimeout);
-				}
-				else {
+				} else {
 					return null;
 				}
 			}
-		}
-		catch (NumberFormatException e) {
+		} catch (NumberFormatException e) {
 			// ignore number format and use global default
 		}
 		return properties.getResponseTimeout();
@@ -281,8 +289,7 @@ public class NettyRoutingFilter implements GlobalFilter, Ordered {
 		Long responseTimeout = null;
 		if (responseTimeoutAttr instanceof Number) {
 			responseTimeout = ((Number) responseTimeoutAttr).longValue();
-		}
-		else if (responseTimeoutAttr != null) {
+		} else if (responseTimeoutAttr != null) {
 			responseTimeout = Long.parseLong(responseTimeoutAttr.toString());
 		}
 		return responseTimeout;

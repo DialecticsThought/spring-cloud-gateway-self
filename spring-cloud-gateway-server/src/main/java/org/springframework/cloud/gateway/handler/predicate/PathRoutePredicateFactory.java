@@ -90,32 +90,36 @@ public class PathRoutePredicateFactory extends AbstractRoutePredicateFactory<Pat
 		return new GatewayPredicate() {
 			@Override
 			public boolean test(ServerWebExchange exchange) {
+				// 当前请求的uri路径  /order/findOrderByUserId/1
 				PathContainer path = (PathContainer) exchange.getAttributes().computeIfAbsent(
 						GATEWAY_PREDICATE_PATH_CONTAINER_ATTR,
 						s -> parsePath(exchange.getRequest().getURI().getRawPath()));
 
 				PathPattern match = null;
 				for (int i = 0; i < pathPatterns.size(); i++) {
+					// yml配置文件中的配置项  /order/**
 					PathPattern pathPattern = pathPatterns.get(i);
+					// 如果path匹配成功，那么match对象就不为null
 					if (pathPattern.matches(path)) {
 						match = pathPattern;
 						break;
 					}
 				}
-
+				// 如果path匹配成功，那么match对象就不为null  。匹配成功的处理逻辑
 				if (match != null) {
 					traceMatch("Pattern", match.getPatternString(), path, true);
 					PathMatchInfo pathMatchInfo = match.matchAndExtract(path);
 					putUriTemplateVariables(exchange, pathMatchInfo.getUriVariables());
 					exchange.getAttributes().put(GATEWAY_PREDICATE_MATCHED_PATH_ATTR, match.getPatternString());
 					String routeId = (String) exchange.getAttributes().get(GATEWAY_PREDICATE_ROUTE_ATTR);
+					// 保存当前路由id
 					if (routeId != null) {
 						// populated in RoutePredicateHandlerMapping
 						exchange.getAttributes().put(GATEWAY_PREDICATE_MATCHED_PATH_ROUTE_ID_ATTR, routeId);
 					}
 					return true;
 				}
-				else {
+				else {  // path匹配不成，返回false
 					traceMatch("Pattern", config.getPatterns(), path, false);
 					return false;
 				}

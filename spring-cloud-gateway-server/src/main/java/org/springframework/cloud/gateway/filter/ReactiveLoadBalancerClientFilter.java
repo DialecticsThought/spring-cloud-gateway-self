@@ -57,8 +57,10 @@ import static org.springframework.cloud.gateway.support.ServerWebExchangeUtils.a
  * @author Spencer Gibb
  * @author Tim Ysewyn
  * @author Olga Maciaszek-Sharma
+ * <p>
+ * TODO 解析lb://服务名，去服务注册中心获取服务实例instance，并通过负载均衡算法选择
  */
-@SuppressWarnings({ "rawtypes", "unchecked" })
+@SuppressWarnings({"rawtypes", "unchecked"})
 public class ReactiveLoadBalancerClientFilter implements GlobalFilter, Ordered {
 
 	private static final Log log = LogFactory.getLog(ReactiveLoadBalancerClientFilter.class);
@@ -78,13 +80,13 @@ public class ReactiveLoadBalancerClientFilter implements GlobalFilter, Ordered {
 	 */
 	@Deprecated
 	public ReactiveLoadBalancerClientFilter(LoadBalancerClientFactory clientFactory,
-			GatewayLoadBalancerProperties properties, LoadBalancerProperties loadBalancerProperties) {
+											GatewayLoadBalancerProperties properties, LoadBalancerProperties loadBalancerProperties) {
 		this.clientFactory = clientFactory;
 		this.properties = properties;
 	}
 
 	public ReactiveLoadBalancerClientFilter(LoadBalancerClientFactory clientFactory,
-			GatewayLoadBalancerProperties properties) {
+											GatewayLoadBalancerProperties properties) {
 		this.clientFactory = clientFactory;
 		this.properties = properties;
 	}
@@ -96,6 +98,7 @@ public class ReactiveLoadBalancerClientFilter implements GlobalFilter, Ordered {
 
 	@Override
 	public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+		// 此时的url是这个样子：   lb://mall-order/order/findOrderByUserId/1?color=blue
 		URI url = exchange.getAttribute(GATEWAY_REQUEST_URL_ATTR);
 		String schemePrefix = exchange.getAttribute(GATEWAY_SCHEME_PREFIX_ATTR);
 		if (url == null || (!"lb".equals(url.getScheme()) && !"lb".equals(schemePrefix))) {
@@ -107,45 +110,50 @@ public class ReactiveLoadBalancerClientFilter implements GlobalFilter, Ordered {
 		if (log.isTraceEnabled()) {
 			log.trace(ReactiveLoadBalancerClientFilter.class.getSimpleName() + " url before: " + url);
 		}
-
+		// 再获取一遍：lb://mall-order/order/findOrderByUserId/1?color=blue
 		URI requestUri = exchange.getAttribute(GATEWAY_REQUEST_URL_ATTR);
+		// 就是服务名：    mall-order
 		String serviceId = requestUri.getHost();
 		Set<LoadBalancerLifecycle> supportedLifecycleProcessors = LoadBalancerLifecycleValidator
 				.getSupportedLifecycleProcessors(clientFactory.getInstances(serviceId, LoadBalancerLifecycle.class),
 						RequestDataContext.class, ResponseData.class, ServiceInstance.class);
+		// 请求信息 封装成一个对象
 		DefaultRequest<RequestDataContext> lbRequest = new DefaultRequest<>(
 				new RequestDataContext(new RequestData(exchange.getRequest()), getHint(serviceId)));
+		// 调用choose()方法
+		// TODO 进入
 		return choose(lbRequest, serviceId, supportedLifecycleProcessors).doOnNext(response -> {
 
-			if (!response.hasServer()) {
-				supportedLifecycleProcessors.forEach(lifecycle -> lifecycle
-						.onComplete(new CompletionContext<>(CompletionContext.Status.DISCARD, lbRequest, response)));
-				throw NotFoundException.create(properties.isUse404(), "Unable to find instance for " + url.getHost());
-			}
+					if (!response.hasServer()) {
+						supportedLifecycleProcessors.forEach(lifecycle -> lifecycle
+								.onComplete(new CompletionContext<>(CompletionContext.Status.DISCARD, lbRequest, response)));
+						throw NotFoundException.create(properties.isUse404(), "Unable to find instance for " + url.getHost());
+					}
+					// 服务注册中心的响应response，获取server实例对象
+					ServiceInstance retrievedInstance = response.getServer();
+					// 值为http://localhost:8888/order/findOrderByUserId/1?color=blue
+					URI uri = exchange.getRequest().getURI();
 
-			ServiceInstance retrievedInstance = response.getServer();
+					// if the `lb:<scheme>` mechanism was used, use `<scheme>` as the default,
+					// if the loadbalancer doesn't provide one.
+					String overrideScheme = retrievedInstance.isSecure() ? "https" : "http";
+					if (schemePrefix != null) {
+						overrideScheme = url.getScheme();
+					}
+					// 服务实例
+					DelegatingServiceInstance serviceInstance = new DelegatingServiceInstance(retrievedInstance,
+							overrideScheme);
+					// 最终通过上面的服务实例，修改之后的请求url为：http://192.168.236.173:8020/order/findOrderByUserId/1?color=blue
+					URI requestUrl = reconstructURI(serviceInstance, uri);
 
-			URI uri = exchange.getRequest().getURI();
-
-			// if the `lb:<scheme>` mechanism was used, use `<scheme>` as the default,
-			// if the loadbalancer doesn't provide one.
-			String overrideScheme = retrievedInstance.isSecure() ? "https" : "http";
-			if (schemePrefix != null) {
-				overrideScheme = url.getScheme();
-			}
-
-			DelegatingServiceInstance serviceInstance = new DelegatingServiceInstance(retrievedInstance,
-					overrideScheme);
-
-			URI requestUrl = reconstructURI(serviceInstance, uri);
-
-			if (log.isTraceEnabled()) {
-				log.trace("LoadBalancerClientFilter url chosen: " + requestUrl);
-			}
-			exchange.getAttributes().put(GATEWAY_REQUEST_URL_ATTR, requestUrl);
-			exchange.getAttributes().put(GATEWAY_LOADBALANCER_RESPONSE_ATTR, response);
-			supportedLifecycleProcessors.forEach(lifecycle -> lifecycle.onStartRequest(lbRequest, response));
-		}).then(chain.filter(exchange))
+					if (log.isTraceEnabled()) {
+						log.trace("LoadBalancerClientFilter url chosen: " + requestUrl);
+					}
+					// 存入exchange对象中，之后netty发送请求会用到该url
+					exchange.getAttributes().put(GATEWAY_REQUEST_URL_ATTR, requestUrl);
+					exchange.getAttributes().put(GATEWAY_LOADBALANCER_RESPONSE_ATTR, response);
+					supportedLifecycleProcessors.forEach(lifecycle -> lifecycle.onStartRequest(lbRequest, response));
+				}).then(chain.filter(exchange))
 				.doOnError(throwable -> supportedLifecycleProcessors.forEach(lifecycle -> lifecycle
 						.onComplete(new CompletionContext<ResponseData, ServiceInstance, RequestDataContext>(
 								CompletionContext.Status.FAILED, throwable, lbRequest,
@@ -160,15 +168,16 @@ public class ReactiveLoadBalancerClientFilter implements GlobalFilter, Ordered {
 	protected URI reconstructURI(ServiceInstance serviceInstance, URI original) {
 		return LoadBalancerUriTools.reconstructURI(serviceInstance, original);
 	}
-
+	// 进入到choose()方法中
 	private Mono<Response<ServiceInstance>> choose(Request<RequestDataContext> lbRequest, String serviceId,
-			Set<LoadBalancerLifecycle> supportedLifecycleProcessors) {
+												   Set<LoadBalancerLifecycle> supportedLifecycleProcessors) {
 		ReactorLoadBalancer<ServiceInstance> loadBalancer = this.clientFactory.getInstance(serviceId,
 				ReactorServiceInstanceLoadBalancer.class);
 		if (loadBalancer == null) {
 			throw new NotFoundException("No loadbalancer available for " + serviceId);
 		}
 		supportedLifecycleProcessors.forEach(lifecycle -> lifecycle.onStart(lbRequest));
+		// 调用ReactorLoadBalancer对象的choose()方法
 		return loadBalancer.choose(lbRequest);
 	}
 

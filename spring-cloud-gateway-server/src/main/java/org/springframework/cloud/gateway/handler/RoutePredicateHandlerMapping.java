@@ -51,7 +51,7 @@ public class RoutePredicateHandlerMapping extends AbstractHandlerMapping {
 	private final ManagementPortType managementPortType;
 
 	public RoutePredicateHandlerMapping(FilteringWebHandler webHandler, RouteLocator routeLocator,
-			GlobalCorsProperties globalCorsProperties, Environment environment) {
+										GlobalCorsProperties globalCorsProperties, Environment environment) {
 		this.webHandler = webHandler;
 		this.routeLocator = routeLocator;
 
@@ -74,6 +74,12 @@ public class RoutePredicateHandlerMapping extends AbstractHandlerMapping {
 		return environment.getProperty(prefix + "port", Integer.class);
 	}
 
+	/**
+	 * TODO 重点
+	 *
+	 * @param exchange
+	 * @return
+	 */
 	@Override
 	protected Mono<?> getHandlerInternal(ServerWebExchange exchange) {
 		// don't handle requests on management port if set and different than server port
@@ -86,17 +92,23 @@ public class RoutePredicateHandlerMapping extends AbstractHandlerMapping {
 
 		return Mono.deferContextual(contextView -> {
 			exchange.getAttributes().put(GATEWAY_REACTOR_CONTEXT_ATTR, contextView);
+			// 核心方法是lookupRoute(exchange)，这里会去进行路由的校验，根据我们配置文件中定义的路由断言规则进行校验
+			// TODO 进入lookupRoute
 			return lookupRoute(exchange)
 					// .log("route-predicate-handler-mapping", Level.FINER) //name this
 					.flatMap((Function<Route, Mono<?>>) r -> {
+						// 下面几行代码就是操作exchange的属性
+						// 上方的lookupRoute()方法中会添加GATEWAY_PREDICATE_ROUTE_ATTR，这里就进行移除
 						exchange.getAttributes().remove(GATEWAY_PREDICATE_ROUTE_ATTR);
 						if (logger.isDebugEnabled()) {
 							logger.debug("Mapping [" + getExchangeDesc(exchange) + "] to " + r);
 						}
-
+						// 把当前路由对象添加进exchange对象中，之后的流程还会用到我们的路由对象
 						exchange.getAttributes().put(GATEWAY_ROUTE_ATTR, r);
+						// 路由匹配成功，就直接返回WebHandler对象
 						return Mono.just(webHandler);
 					}).switchIfEmpty(Mono.empty().then(Mono.fromRunnable(() -> {
+						// 当前请求没有任何一个路由匹配上的处理流程
 						exchange.getAttributes().remove(GATEWAY_PREDICATE_ROUTE_ATTR);
 						if (logger.isTraceEnabled()) {
 							logger.trace("No RouteDefinition found for [" + getExchangeDesc(exchange) + "]");
@@ -125,14 +137,36 @@ public class RoutePredicateHandlerMapping extends AbstractHandlerMapping {
 	}
 
 	protected Mono<Route> lookupRoute(ServerWebExchange exchange) {
+		// 获取到我们yml配置文件中所有定义的路由，并进行遍历
 		return this.routeLocator.getRoutes()
 				// individually filter routes so that filterWhen error delaying is not a
 				// problem
 				.concatMap(route -> Mono.just(route).filterWhen(r -> {
-					// add the current route we are testing
-					exchange.getAttributes().put(GATEWAY_PREDICATE_ROUTE_ATTR, r.getId());
-					return r.getPredicate().apply(exchange);
-				})
+							// add the current route we are testing
+							// 添加GATEWAY_PREDICATE_ROUTE_ATTR
+							exchange.getAttributes().put(GATEWAY_PREDICATE_ROUTE_ATTR, r.getId());
+							/**
+							 * 调用当前路由对象中的断言的apply()方法，apply()方法中又是一些异步的处理流程
+							 * TODO 这里就会根据我们配置文件中为路由配置的各个断言，去调用各个断言对象
+							 * AsyncPredicate有多个实现类
+							 * eg:
+							 * 1.DefaultAsyncPredicate<T>
+							 *     他的apply方法是 Publisher<Boolean> apply(T t) {return Mono.just(delegate.test(t));}
+							 * 2.AndAsyncPredicate
+							 * AndAsyncPredicate将所有的 Predicate 分为两部分：left 和 right，
+							 * 而每一部分的 Predicate 又都被 AsyncPredicate 包装。
+							 * 调用 Predicate.apply() 方法做谓词匹配时，会分别调用 left 和 right 的 apply() 方法；
+							 * left#apply() 方法是一个递归操作，递归直到 left 中仅包含一个 Predicate 时，再往上返回。
+							 *
+							 *
+							 * TODO 这里 以 去看path路径匹配的断言类PathRoutePredicateFactory 为例子
+							 * 先查看AsyncPredicate 的apply方法
+							 * 1.调用到 DefaultAsyncPredicate的
+							 *   Publisher<Boolean> apply(T t) {return Mono.just(delegate.test(t));}
+							 * 2.有调用到 GatewayPredicate#test 这个方法会做具体的路径匹配
+							 */
+							return r.getPredicate().apply(exchange);
+						})
 						// instead of immediately stopping main flux due to error, log and
 						// swallow it
 						.doOnError(e -> logger.error("Error applying predicate for route: " + route.getId(), e))
@@ -161,7 +195,8 @@ public class RoutePredicateHandlerMapping extends AbstractHandlerMapping {
 	 * <p>
 	 * The default implementation is empty. Can be overridden in subclasses, for example
 	 * to enforce specific preconditions expressed in URL mappings.
-	 * @param route the Route object to validate
+	 *
+	 * @param route    the Route object to validate
 	 * @param exchange current exchange
 	 * @throws Exception if validation failed
 	 */

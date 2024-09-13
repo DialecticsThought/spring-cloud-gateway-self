@@ -61,13 +61,16 @@ public class RouteToRequestUrlFilter implements GlobalFilter, Ordered {
 
 	@Override
 	public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+		// 从exchange中取路由Route对象
 		Route route = exchange.getAttribute(GATEWAY_ROUTE_ATTR);
 		if (route == null) {
 			return chain.filter(exchange);
 		}
 		log.trace("RouteToRequestUrlFilter start");
+		// 取当前请求uri ： http://localhost:8888/order/findOrderByUserId/1?color=blue
 		URI uri = exchange.getRequest().getURI();
 		boolean encoded = containsEncodedParts(uri);
+		// 路由对象中保存的uri，也就是我们在yml文件中配置的值：   lb://mall-order
 		URI routeUri = route.getUri();
 
 		if (hasAnotherScheme(routeUri)) {
@@ -76,7 +79,7 @@ public class RouteToRequestUrlFilter implements GlobalFilter, Ordered {
 			exchange.getAttributes().put(GATEWAY_SCHEME_PREFIX_ATTR, routeUri.getScheme());
 			routeUri = URI.create(routeUri.getSchemeSpecificPart());
 		}
-
+		// 如果我们在yml文件中配置的uri，即不是lb开头并且host还为null，那么就抛异常
 		if ("lb".equalsIgnoreCase(routeUri.getScheme()) && routeUri.getHost() == null) {
 			// Load balanced URIs should always have a host. If the host is null it is
 			// most
@@ -84,11 +87,13 @@ public class RouteToRequestUrlFilter implements GlobalFilter, Ordered {
 			// underscore)
 			throw new IllegalStateException("Invalid host: " + routeUri.toString());
 		}
-
+		// 转换结果为：  lb://mall-order/order/findOrderByUserId/1?color=blu
 		URI mergedUrl = UriComponentsBuilder.fromUri(uri)
 				// .uri(routeUri)
 				.scheme(routeUri.getScheme()).host(routeUri.getHost()).port(routeUri.getPort()).build(encoded).toUri();
+		// 存入exchange中，之后的LoadBalancer全局Filter中会用到
 		exchange.getAttributes().put(GATEWAY_REQUEST_URL_ATTR, mergedUrl);
+		// 继续filter执行
 		return chain.filter(exchange);
 	}
 
